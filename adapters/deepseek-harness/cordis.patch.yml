@@ -1,0 +1,5 @@
+# Bundle layer: `dsh plugin add` installs this package and the profile applies
+# this patch, inserting the plugin by package name (Node resolves `main`).
+- insert:
+    - id: file-viewer
+      name: dsh-file-viewer

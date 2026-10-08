@@ -1,0 +1,6 @@
+# Dev overlay for `dsh web --patch <this file>` — loads the TypeScript source
+# directly (no build step; Node >= 22.18 native type stripping). The path MUST
+# be absolute and MUST use forward slashes on Windows.
+- insert:
+    - id: file-viewer
+      name: 'D:/1024/my/plugin-file-viewer/adapters/deepseek-harness/src/index.ts'

@@ -3,9 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Git-aware read-only file viewer: core TS logic + adapters (claude-code mod first; codex/opencode/deepseek-harness reserved)",
+  "description": "Git-aware read-only file viewer: platform-agnostic TS core + adapters for Claude Code, OpenCode, DeepSeek Harness (Codex scaffolded). Ported from herdr-file-viewer.",
   "scripts": {
     "test": "node --test \"core/src/**/*.test.ts\"",
-    "test:claude": "claude plugin test"
+    "test:claude": "claude plugin test",
+    "test:opencode": "node --test \"adapters/opencode/tests/*.test.ts\"",
+    "test:dsh": "node --test \"adapters/deepseek-harness/tests/*.test.ts\"",
+    "test:all": "npm test && npm run test:opencode && npm run test:dsh && claude plugin test ./adapters/claude-code",
+    "sync": "node scripts/sync-core.mjs"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.35",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
   }
 }

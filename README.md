@@ -5,17 +5,16 @@
 ## 架构
 
 ```
-                    adapters/claude-code   ✅ 已实装 (v0.1)
-                              │
-    adapters/codex  📁 骨架 ──┼── adapters/opencode  📁 骨架
+              adapters/claude-code   ✅ pane + /files
+              adapters/opencode      ✅ 4 tools（v1 plugin）
+              adapters/deepseek-harness ✅ 3 tools + /files（Cordis bundle）
+              adapters/codex         📁 骨架（skill → MCP 路线）
                               │
                     ┌─────────▼─────────┐
                     │      core/        │   平台无关 TS · 零依赖
                     │  single source of │   types / host / git / tree
                     │      truth        │   view_policy / fuzzy / search
-                    └─────────▲─────────┘
-                              │
-              adapters/deepseek-harness  📁 骨架
+                    └───────────────────┘
 ```
 
 `core/` 只做纯逻辑 + `Host` I/O 接口，不 import `node:*`；每个 adapter 负责把自己的宿主能力（fs / 进程 / UI）实现成 `Host`。
@@ -25,9 +24,9 @@
 | 适配层 | harness | 状态 | 入口 |
 | --- | --- | --- | --- |
 | [`adapters/claude-code/`](adapters/claude-code/) | Claude Code（mods） | **已实装 (v0.1)** | `/files` 命令 + `file-viewer` pane |
+| [`adapters/opencode/`](adapters/opencode/) | OpenCode（v1 plugin，1.18.35） | **已实装 (v0.1)** | 4 个自定义 tool：`file_tree` / `file_diff` / `file_search` / `content_search` |
+| [`adapters/deepseek-harness/`](adapters/deepseek-harness/) | DeepSeek Harness（Cordis bundle，锁 0.2.0-rc.2） | **已实装 (v0.1)** | 3 个 tool + `/files` 命令（右栏降级见其 README） |
 | [`adapters/codex/`](adapters/codex/) | Codex（Agent Plugins） | 骨架 · `Status: scaffold` | `plugin.json` + `skills/file-viewer/SKILL.md` |
-| [`adapters/opencode/`](adapters/opencode/) | OpenCode（plugin） | 骨架 · `Status: scaffold` | `plugin.ts` → 占位 tool `open_file_viewer` |
-| [`adapters/deepseek-harness/`](adapters/deepseek-harness/) | DeepSeek Harness（Cordis） | 骨架 · `Status: scaffold` | `index.ts`（JSDoc 挂点 + 空实现） |
 
 每个骨架的集成路线与出处链接见各自 README。
 
@@ -52,9 +51,34 @@ claude --plugin-dir ./adapters/claude-code          # 以本地插件启动
 
 会话内输入 `/files`（或 `/files path[:line]`）打开查看器。mod 行为规格见 [ARCHITECTURE.md](ARCHITECTURE.md) §5。
 
-### 其余三个 harness
+### OpenCode
 
-骨架阶段没有可运行产物，安装/接入方式见各适配层 README（codex：marketplace；opencode：`.opencode/plugins/` + `bun add -d @opencode-ai/plugin`；dsh：等扩展点定稿）。
+仓库根的 `opencode.json` 已把 `adapters/opencode/plugin.ts` 挂进 `plugin` 数组（依赖 `@opencode-ai/plugin` 已在根 `package.json`）：
+
+```bash
+npm install                               # 首次：装根依赖
+opencode debug info                       # plugins 列表应出现 file:///.../adapters/opencode/plugin.ts
+npm run test:opencode                     # 22 个工具单测
+opencode                                  # 会话内 agent 可直接调 4 个工具
+```
+
+无热重载：改插件后重开 opencode。工具表见 [`adapters/opencode/README.md`](adapters/opencode/README.md)。
+
+### DeepSeek Harness
+
+```bash
+node scripts/sync-core.mjs                                                            # core → src/core
+npm run test:dsh                                                                      # 34 个单测
+npx -y @deepseek-ai/dsh@0.2.0-rc.2 --profile web --dump-config                        # 组合校验
+npx -y @deepseek-ai/dsh@0.2.0-rc.2 web --patch "$(pwd)/adapters/deepseek-harness/cordis.yml" --no-open --port 3199
+# 启动日志出现 [file-viewer] loaded 即挂载成功（无需 API key），用完结束进程
+```
+
+锁版本 0.2.0-rc.2（上游 rc/alpha 高频破坏性变更，见其 README）。
+
+### Codex（骨架）
+
+接入路线见 [`adapters/codex/README.md`](adapters/codex/README.md)（skill → mcp.json 打包 MCP → lifecycle hooks）。
 
 ## 键位
 
