@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# claude code generated type declarations
+adapters/claude-code/.claude-plugin/types/
+
+# debug
+*.log
+debug.log
+
+# editor / os
+.DS_Store
+Thumbs.db
+*.swp
+
+# local scratch
+*.local
+.env

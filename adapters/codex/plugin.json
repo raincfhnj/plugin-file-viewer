@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "file-viewer",
+  "version": "0.1.0",
+  "description": "Git-aware read-only file viewer: locate files, open them at path:line, and show diffs through shared core logic."
+}

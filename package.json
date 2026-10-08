@@ -1,0 +1,11 @@
+{
+  "name": "plugin-file-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Git-aware read-only file viewer: core TS logic + adapters (claude-code mod first; codex/opencode/deepseek-harness reserved)",
+  "scripts": {
+    "test": "node --test \"core/src/**/*.test.ts\"",
+    "test:claude": "claude plugin test"
+  }
+}

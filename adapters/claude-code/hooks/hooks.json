@@ -1,0 +1,4 @@
+{
+  "description": "git-aware file viewer",
+  "modules": ["./register.ts"]
+}

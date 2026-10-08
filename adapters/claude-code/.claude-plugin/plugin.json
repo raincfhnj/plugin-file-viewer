@@ -1,0 +1,6 @@
+{
+  "name": "file-viewer",
+  "version": "0.1.0",
+  "description": "Git-aware read-only file viewer: tree, diffs, rendered markdown, fuzzy find",
+  "author": { "name": "plugin-file-viewer" }
+}
