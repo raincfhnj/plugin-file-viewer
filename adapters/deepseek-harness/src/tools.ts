@@ -20,6 +20,12 @@ import { createTreeState, listRows } from './core/tree.ts';
 import { searchContent } from './core/search.ts';
 import { isAbsolutePath, relativeToWorkspace, toPosixPath } from './address.ts';
 import {
+  appendSidebarMeta,
+  fileViewerMetaOf,
+  sessionFileAddress,
+  stripSidebarMeta,
+} from './meta.ts';
+import {
   DEFAULT_DIFF_CHARS,
   DEFAULT_SEARCH_LIMIT,
   DEFAULT_TREE_ROWS,
@@ -36,8 +42,12 @@ export interface ToolDeps {
   processCwd: () => string;
 }
 
-/** Minimal structural view of the execution's agent (real: dsh Agent). */
+/** Minimal structural view of the execution's agent (real: dsh Agent).
+ * `agent.id` IS the Session id (`Agent.id: SessionId`, dsh-agent types), which
+ * is what `dsh-resource://file/session/<id>/…` addresses need.
+ */
 interface AgentLike {
+  id?: string;
   session?: { header?: { cwd?: string } };
 }
 
@@ -179,20 +189,24 @@ export interface DiffToolArgs {
   full_context?: boolean;
 }
 
-/** Build the `file_diff` output text. */
+/** Build the `file_diff` output text. `sessionId` appends sidebar metadata
+ * (stripped from model content, projected into `tool/result.meta`). */
 export async function buildFileDiffText(
   host: Host,
   cwd: string,
   args: DiffToolArgs,
+  sessionId?: string,
 ): Promise<string> {
   const { base, gitRoot } = await workspaceBaseFor(host, cwd);
   const rel = toBaseRel(base, args.path);
   const repoDir = gitRoot ?? base;
 
   if (!(await isRepo(host, repoDir))) {
-    return [`# diff ${rel || args.path} vs HEAD`, '(not a git repository — diff unavailable)'].join(
+    const note = [`# diff ${rel || args.path} vs HEAD`, '(not a git repository — diff unavailable)'].join(
       '\n',
     );
+    const noteAddress = sessionFileAddress(sessionId, cwd, base, rel || args.path, note);
+    return noteAddress ? appendSidebarMeta(note, { address: noteAddress }) : note;
   }
 
   // Report the baseline git will actually diff against: 'Base' with no base
@@ -220,7 +234,12 @@ export async function buildFileDiffText(
     baseBranch: args.base_branch,
     fullContext: args.full_context,
   });
-  return formatDiff(rel || args.path, baseline, text, { maxChars: DEFAULT_DIFF_CHARS });
+  const formatted = formatDiff(rel || args.path, baseline, text, { maxChars: DEFAULT_DIFF_CHARS });
+  // Deleted files have no on-disk content to preview; everything else in the
+  // workspace gets a session-scope address for the right-sidebar auto-open.
+  const address =
+    st === 'Deleted' ? undefined : sessionFileAddress(sessionId, cwd, base, rel || args.path);
+  return address ? appendSidebarMeta(formatted, { address }) : formatted;
 }
 
 export interface SearchToolArgs {
@@ -229,11 +248,13 @@ export interface SearchToolArgs {
   limit?: number;
 }
 
-/** Build the `content_search` output text (`path:line` rows). */
+/** Build the `content_search` output text (`path:line` rows). `sessionId`
+ * appends a sidebar address/line for the first match (host-only metadata). */
 export async function buildSearchText(
   host: Host,
   cwd: string,
   args: SearchToolArgs,
+  sessionId?: string,
 ): Promise<string> {
   const { base, gitRoot } = await workspaceBaseFor(host, cwd);
   const root = toBaseRel(base, args.path);
@@ -244,11 +265,14 @@ export async function buildSearchText(
     return `(path not found: ${root})`;
   }
   const matches = await searchContent(fsHost, root, args.query, { limit });
-  return formatSearch(matches, {
+  const text = formatSearch(matches, {
     query: args.query,
     limit,
     limitHit: matches.length >= limit,
   });
+  const first = matches[0];
+  const address = first ? sessionFileAddress(sessionId, cwd, base, first.path) : undefined;
+  return address ? appendSidebarMeta(text, { address, line: first!.line }) : text;
 }
 
 const TREE_DESCRIPTION =
@@ -294,7 +318,11 @@ export function createFileTreeTool(deps: ToolDeps) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      // Sidebar metadata lives in the canonical value only: stripped from the
+      // model-facing text, re-projected into tool/result.meta for the browser
+      // half's right-sidebar auto-open (src/client.ts).
+      render: (_args, value) => [{ type: 'text', text: stripSidebarMeta(value) }],
+      presentationMeta: (_args, value) => fileViewerMetaOf(value),
     },
     async execute(args, exec) {
       return await buildFileTreeText(deps.host, execCwd(exec, deps.processCwd), args);
@@ -330,10 +358,12 @@ export function createFileDiffTool(deps: ToolDeps) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      render: (_args, value) => [{ type: 'text', text: stripSidebarMeta(value) }],
+      presentationMeta: (_args, value) => fileViewerMetaOf(value),
     },
     async execute(args, exec) {
-      return await buildFileDiffText(deps.host, execCwd(exec, deps.processCwd), args);
+      const cwd = execCwd(exec, deps.processCwd);
+      return await buildFileDiffText(deps.host, cwd, args, exec?.agent?.id);
     },
   });
 }
@@ -360,10 +390,12 @@ export function createContentSearchTool(deps: ToolDeps) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      render: (_args, value) => [{ type: 'text', text: stripSidebarMeta(value) }],
+      presentationMeta: (_args, value) => fileViewerMetaOf(value),
     },
     async execute(args, exec) {
-      return await buildSearchText(deps.host, execCwd(exec, deps.processCwd), args);
+      const cwd = execCwd(exec, deps.processCwd);
+      return await buildSearchText(deps.host, cwd, args, exec?.agent?.id);
     },
   });
 }

@@ -13,6 +13,13 @@ export interface TreeOptions {
   changedOnly: boolean;
   /** Hide dotfiles/dotdirs (except '.'-root basics). */
   hideHidden: boolean;
+  /**
+   * Baseline changed-set (git.rs changed_filter): fallback markers so files
+   * changed against the baseline carry a status even when the working tree is
+   * clean, and the changed-only filter's source. Working-tree status always
+   * wins over this map (git.rs status_for precedence).
+   */
+  changedSet?: Map<string, GitStatus>;
 }
 
 export const DEFAULT_TREE_OPTIONS: TreeOptions = { changedOnly: false, hideHidden: true };
@@ -42,9 +49,12 @@ export function select(path: string, kind: NodeKind): (s: TreeState) => TreeStat
 /**
  * Produce the visible rows for the current expansion state (tree.rs `visible_nodes`).
  * Directories before files, alphabetical within each group (cmp_sibling); status
- * markers come from `statusMap` (repo-root-relative POSIX keys); `dirDirty` is a
- * component-wise prefix inference over `statusMap`, so collapsed dirs get it too.
- * statusMap empty (no git repo) + changedOnly → empty rows.
+ * markers come from `statusMap` (repo-root-relative POSIX keys) falling back to
+ * `opts.changedSet` (git.rs `status_for`: working-tree status wins, the baseline
+ * set fills in clean-but-committed files), `dirDirty` is a component-wise prefix
+ * inference over the union of both maps, so collapsed dirs get it too.
+ * changed-only filters on `opts.changedSet` when given (herdr's `c` semantics),
+ * else on `statusMap`. Empty sources (no git repo) + changedOnly → empty rows.
  */
 export async function listRows(
   host: Host,
@@ -52,7 +62,11 @@ export async function listRows(
   statusMap: Map<string, GitStatus>,
   opts: TreeOptions = DEFAULT_TREE_OPTIONS,
 ): Promise<TreeNode[]> {
-  if (opts.changedOnly) return changedOnlyRows(state, statusMap);
+  const filter = opts.changedSet ?? statusMap;
+  if (opts.changedOnly) return changedOnlyRows(state, filter);
+
+  const statusOf = (path: string): GitStatus | undefined =>
+    statusMap.get(path) ?? opts.changedSet?.get(path);
 
   const rows: TreeNode[] = [];
   await walk(state.root, 0);
@@ -78,8 +92,8 @@ export async function listRows(
           kind: 'dir',
           depth,
           expanded,
-          status: statusMap.get(path),
-          dirDirty: dirHasChange(statusMap, path),
+          status: statusOf(path),
+          dirDirty: dirHasChange(statusMap, opts.changedSet, path),
         });
         if (expanded) await walk(path, depth + 1);
       } else {
@@ -88,7 +102,7 @@ export async function listRows(
           kind: 'file',
           depth,
           expanded: false,
-          status: statusMap.get(path),
+          status: statusOf(path),
           dirDirty: false,
         });
       }
@@ -138,16 +152,25 @@ function nameOf(path: string): string {
 }
 
 /**
- * dir_dirty (tree.rs dir_contains_change): any changed file lives under `dir`.
- * Component-wise prefix match (`src` is never dirtied by `src2/…`, the dir's own
- * path excluded) over the status map — cheap, so collapsed dirs get it too.
+ * dir_dirty (tree.rs dir_contains_change): any changed file lives under `dir`,
+ * over the union of working-tree status and the baseline changed-set (the Rust
+ * original chains `markers` and `changed_filter`). Component-wise prefix match
+ * (`src` is never dirtied by `src2/…`, the dir's own path excluded) — cheap,
+ * so collapsed dirs get it too.
  */
-function dirHasChange(statusMap: Map<string, GitStatus>, dir: string): boolean {
+function dirHasChange(
+  statusMap: Map<string, GitStatus>,
+  changedSet: Map<string, GitStatus> | undefined,
+  dir: string,
+): boolean {
   const prefix = dir + '/';
-  for (const key of statusMap.keys()) {
-    if (key !== dir && key.startsWith(prefix)) return true;
-  }
-  return false;
+  const hit = (map: Map<string, GitStatus>): boolean => {
+    for (const key of map.keys()) {
+      if (key !== dir && key.startsWith(prefix)) return true;
+    }
+    return false;
+  };
+  return hit(statusMap) || (changedSet !== undefined && hit(changedSet));
 }
 
 /**

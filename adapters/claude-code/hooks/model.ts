@@ -2,7 +2,13 @@ import type { FileRef, GitStatus, Host, NodeKind, TreeNode } from './core/types.
 import { createTreeState, listRows, nextChanged, toggle, type TreeState } from './core/tree.ts';
 import { describeFile } from './core/view_policy.ts';
 import { fuzzyFilter } from './core/fuzzy.ts';
-import { fileDiff, status as gitStatus } from './core/git.ts';
+import {
+  changedSet,
+  currentBranch,
+  defaultBaseline,
+  fileDiff,
+  status as gitStatus,
+} from './core/git.ts';
 import { createHost, type Engine } from './host.ts';
 import {
   cycleMode,
@@ -37,6 +43,8 @@ const EMPTY: Model = {
   isFindOpen: false,
   findQuery: '',
   status: '',
+  rootName: '',
+  focusSide: 'toolbar',
 };
 
 let engine: Engine | null = null;
@@ -46,6 +54,8 @@ let isRepo = false;
 let host: Host | null = null;
 let tree: TreeState = createTreeState('');
 let statusMap = new Map<string, GitStatus>();
+/** Baseline changed-set (herdr changed_filter): fallback markers + `c` source. */
+let changedMap = new Map<string, GitStatus>();
 let m: Model = { ...EMPTY };
 let shown = false;
 let size: PaneSize = { bodyColumns: 80, bodyRows: 24 };
@@ -135,6 +145,7 @@ export function resetSession(sessionCwd: string): void {
   host = null;
   tree = createTreeState('');
   statusMap = new Map();
+  changedMap = new Map();
   m = { ...EMPTY };
   shown = false;
   size = { bodyColumns: 80, bodyRows: 24 };
@@ -210,6 +221,13 @@ async function ensureRepo(): Promise<void> {
   }
   host = createHost(engine, repoRoot);
   tree = createTreeState('');
+  m = { ...m, rootName: baseNameOf(repoRoot === cwd ? cwd : repoRoot) };
+}
+
+function baseNameOf(path: string): string {
+  const clean = path.replace(/\/+$/, '');
+  const at = clean.lastIndexOf('/');
+  return at === -1 ? clean : clean.slice(at + 1);
 }
 
 async function loadPrefs(): Promise<void> {
@@ -217,7 +235,12 @@ async function loadPrefs(): Promise<void> {
   prefsKey = repoRoot;
   try {
     const baseline = await engine.storeGet(storeKey('baseline'));
-    if (baseline === 'HEAD' || baseline === 'Base') m = { ...m, baseline };
+    if (baseline === 'HEAD' || baseline === 'Base') {
+      m = { ...m, baseline };
+    } else if (host && isRepo) {
+      // herdr default_baseline: no stored preference → context-smart (AC-14/15).
+      m = { ...m, baseline: await defaultBaseline(host, repoRoot) };
+    }
     const changedOnly = await engine.storeGet(storeKey('changedOnly'));
     if (typeof changedOnly === 'boolean') m = { ...m, changedOnly };
     const changedView = await engine.storeGet(storeKey('changedView'));
@@ -237,12 +260,25 @@ async function savePref(name: string, value: unknown): Promise<void> {
   }
 }
 
+/** Marker/policy status for a path: working-tree status wins, baseline set fills in. */
+function statusOf(path: string): GitStatus | undefined {
+  return statusMap.get(path) ?? changedMap.get(path);
+}
+
+/** Track which column was touched last (herdr focus → border highlight). */
+export function setFocusSide(side: Model['focusSide']): void {
+  if (m.focusSide === side) return;
+  m = { ...m, focusSide: side };
+  redraw();
+}
+
 async function rebuildRows(): Promise<void> {
   if (!host) return;
   try {
     const rows = await listRows(host, tree, statusMap, {
       changedOnly: m.changedOnly,
       hideHidden: HIDE_HIDDEN,
+      changedSet: changedMap,
     });
     m = { ...m, rows };
   } catch (err) {
@@ -268,9 +304,21 @@ export async function refresh(): Promise<void> {
     }
     statusMap = next;
     await loadPrefs();
+    // Baseline changed-set (herdr refresh_git_state): marker fallback + `c` source.
+    try {
+      changedMap = isRepo ? await changedSet(host, repoRoot, m.baseline) : new Map();
+    } catch {
+      changedMap = new Map();
+    }
+    let branch: string | undefined;
+    try {
+      branch = isRepo ? await currentBranch(host, repoRoot) : undefined;
+    } catch {
+      branch = undefined;
+    }
     await rebuildRows();
     ensureVisible();
-    m = { ...m, isRepo };
+    m = { ...m, isRepo, branch };
     if (shown && m.selectedKind === 'file' && m.selectedPath !== undefined) scheduleContent();
   } catch (err) {
     m = { ...m, rows: [], status: 'refresh failed: ' + errorText(err) };
@@ -367,7 +415,7 @@ export function selectPath(path: string, kind: NodeKind, line?: number): void {
     return;
   }
   if (changed || line !== undefined) {
-    const fd = describeFile(path, statusMap.get(path));
+    const fd = describeFile(path, statusOf(path));
     const mode =
       line !== undefined && !fd.isDeleted
         ? fd.isMarkdown
@@ -426,6 +474,7 @@ export function handleScroll(by: number, bodyRows: number, pointerColumn?: numbe
     (m.layoutSide === 'tree-right'
       ? pointerColumn >= size.bodyColumns - layout.treeColumns
       : pointerColumn < layout.treeColumns);
+  if (pointerColumn !== undefined) setFocusSide(overTree ? 'tree' : 'content');
   if (overTree) moveSelection(by);
   else scrollContent(by, layout.contentRows);
 }
@@ -465,7 +514,7 @@ async function reveal(path: string): Promise<void> {
     expanded.add(acc);
   }
   tree = { ...tree, expanded };
-  if (m.changedOnly && !statusMap.has(path)) {
+  if (m.changedOnly && !statusOf(path)) {
     m = { ...m, changedOnly: false };
     await savePref('changedOnly', false);
   }
@@ -497,6 +546,16 @@ async function submitFind(value: string): Promise<void> {
 async function cycleBaseline(): Promise<void> {
   m = { ...m, baseline: m.baseline === 'HEAD' ? 'Base' : 'HEAD' };
   await savePref('baseline', m.baseline);
+  // herdr `b`: markers and the changed-only filter are baseline-dependent too.
+  if (host && isRepo) {
+    try {
+      changedMap = await changedSet(host, repoRoot, m.baseline);
+    } catch {
+      changedMap = new Map();
+    }
+    await rebuildRows();
+    ensureVisible();
+  }
   if (m.selectedKind === 'file') {
     pendingLine = undefined;
     scheduleContent();
@@ -521,7 +580,7 @@ async function toggleLayout(): Promise<void> {
 function cycleView(): void {
   const path = m.selectedPath;
   if (path === undefined || m.selectedKind !== 'file') return;
-  const fd = describeFile(path, statusMap.get(path));
+  const fd = describeFile(path, statusOf(path));
   m = { ...m, viewMode: cycleMode(fd, m.changedView, m.viewMode) };
   pendingLine = undefined;
   scheduleContent();

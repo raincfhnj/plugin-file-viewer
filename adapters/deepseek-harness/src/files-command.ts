@@ -6,8 +6,11 @@
  * is provided only by the browser half of `@deepseek-ai/dsh-client-ui-sidebar-right`
  * (its host half is an empty `apply()`), so a host-side command handler cannot
  * call `openResource`. `getSidebarRight` therefore stays optional: the handler
- * tries it when present (future/client-plane wiring) and otherwise degrades to
- * file info plus the `dsh-resource://` address — documented in the README.
+ * tries it when present (future/client-plane wiring) and otherwise emits file
+ * info plus the `dsh-resource://` address — the browser half (src/client.ts)
+ * watches this command's `command/run` + `command/done` session events and
+ * opens that address in the right sidebar automatically, which is the chain
+ * documented in the README.
  *
  * Types here are structural on purpose: the command registry's real
  * `CommandInvocation` / `CommandResult` satisfy them, so this module carries no
@@ -54,8 +57,9 @@ const USAGE =
 
 const HOST_PLANE_NOTE =
   'note: opening the right sidebar needs the client-plane ctx.sidebarRight, which dsh 0.2.0-rc.2 ' +
-  'does not expose to host command handlers (see adapters/deepseek-harness/README.md); the ' +
-  'address above is what a client-side navigator would open.';
+  'does not expose to host command handlers; with the file-viewer browser half mounted, the Web ' +
+  'client opens the address above automatically from this command\u2019s session events (see ' +
+  'adapters/deepseek-harness/README.md).';
 
 const STATUS_STALE =
   'git: path changed in the working tree but no longer exists on disk (deleted)';

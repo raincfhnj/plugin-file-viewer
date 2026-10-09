@@ -14,6 +14,7 @@ import {
   refresh,
   resetSession,
   scheduleRefresh,
+  setFocusSide,
   setShown,
 } from './model.ts';
 
@@ -106,7 +107,12 @@ export function register(on: On, options?: Record<string, unknown>): void {
 
   on('ui.focus', { component: 'Pane', requestId: PANE_ID }, ($, e, next) => {
     const key = e.element;
-    if (typeof key === 'string' && key.startsWith('row:')) focusRow(key.slice(4));
+    if (typeof key === 'string' && key.startsWith('row:')) {
+      setFocusSide('tree');
+      focusRow(key.slice(4));
+    } else if (typeof key === 'string') {
+      setFocusSide('toolbar');
+    }
     return next(e);
   }).catch(($, e, next) => next(e));
 

@@ -55,6 +55,12 @@ export interface Model {
   isFindOpen: boolean;
   findQuery: string;
   status: string;
+  /** The tree root's basename — the tree column's header line (herdr border title). */
+  rootName: string;
+  /** Current git branch; undefined outside a repo / on a detached HEAD. */
+  branch?: string;
+  /** Which region was touched last (herdr focus → border highlight). */
+  focusSide: 'tree' | 'content' | 'toolbar';
 }
 
 /** The callbacks the drawing wires to its controls. */
@@ -86,7 +92,12 @@ export interface PaneElements {
 
 const TOOLBAR_ROWS = 1;
 const STATUS_ROWS = 1;
-const MIN_SIDE_ROWS = 3;
+const BORDER_ROWS = 2;
+/** Rows the tree/content columns need beyond border + their header line. */
+const MIN_SIDE_ROWS = 4;
+/** Border colours (herdr border_style): focused accent vs idle dim. */
+const FOCUS_BORDER = 'promptBorder';
+const IDLE_BORDER = 'inactive';
 
 export function clamp(value: number, low: number, high: number): number {
   return value < low ? low : value > high ? high : value;
@@ -96,8 +107,10 @@ export function clamp(value: number, low: number, high: number): number {
 export function layoutOf(size: PaneSize): Layout {
   const sideRows = Math.max(MIN_SIDE_ROWS, size.bodyRows - TOOLBAR_ROWS - STATUS_ROWS);
   const treeRows = sideRows;
-  const treeWindowRows = Math.max(1, treeRows - 2);
-  const contentRows = Math.max(1, sideRows - 1);
+  // Border (2) + the root-name header line the tree column now draws inside it.
+  const treeWindowRows = Math.max(1, treeRows - BORDER_ROWS - 1);
+  // The content column borders itself too: border (2) + the file header line.
+  const contentRows = Math.max(1, sideRows - BORDER_ROWS - 1);
   let treeColumns = Math.round(size.bodyColumns * 0.3);
   treeColumns = clamp(treeColumns, 16, 44);
   treeColumns = Math.min(treeColumns, Math.max(12, size.bodyColumns - 24));
@@ -109,8 +122,13 @@ function baseName(path: string): string {
   return at === -1 ? path : path.slice(at + 1);
 }
 
-function statusMark(row: TreeNode): string {
-  if (row.kind === 'dir') return ' ';
+/**
+ * One-character git marker (herdr presenter status_marker): files carry their
+ * status letter; a directory containing a change carries `●` (was a `~` name
+ * suffix — herdr puts the glyph in its own column so it survives color loss).
+ */
+export function statusMark(row: TreeNode): string {
+  if (row.kind === 'dir') return row.dirDirty ? '●' : ' ';
   switch (row.status) {
     case 'Modified':
       return 'M';
@@ -125,14 +143,42 @@ function statusMark(row: TreeNode): string {
   }
 }
 
-/** One tree row: selection mark, git mark, depth indent, expansion caret, name. */
-export function rowLabel(row: TreeNode, isSelected: boolean): string {
-  const selection = isSelected ? '❯ ' : '  ';
-  const mark = statusMark(row) + ' ';
+/**
+ * Marker-cell colour (herdr row_color): modified/deleted and dirty dirs red,
+ * added/untracked green — theme keys so the person's palette wins.
+ */
+export function markerColor(row: TreeNode): string | undefined {
+  if (row.kind === 'dir') return row.dirDirty ? 'error' : undefined;
+  switch (row.status) {
+    case 'Modified':
+    case 'Deleted':
+      return 'error';
+    case 'Added':
+    case 'Untracked':
+      return 'success';
+    default:
+      return undefined;
+  }
+}
+
+/** The pressable marker cell: selection slot + status glyph + padding (4 columns). */
+export function markerCell(row: TreeNode, isSelected: boolean): string {
+  return (isSelected ? '❯ ' : '  ') + statusMark(row) + ' ';
+}
+
+/**
+ * The name cell: 2-space-per-depth indent, expansion caret (files reserve the
+ * caret's width too — herdr #130, so siblings at one depth line up), name.
+ */
+export function rowName(row: TreeNode): string {
   const indent = '  '.repeat(Math.max(0, row.depth));
-  const caret = row.kind === 'dir' ? (row.expanded ? '▾ ' : '▸ ') : '';
-  const name = (row.label ?? baseName(row.path)) + (row.kind === 'dir' && row.dirDirty ? '~' : '');
-  return selection + mark + indent + caret + name;
+  const caret = row.kind === 'dir' ? (row.expanded ? '▾ ' : '▸ ') : '  ';
+  return indent + caret + (row.label ?? baseName(row.path));
+}
+
+/** The whole row as one string (tests + opencode's byte-compatible copy). */
+export function rowLabel(row: TreeNode, isSelected: boolean): string {
+  return markerCell(row, isSelected) + rowName(row);
 }
 
 /** Trim text to the element cap, leaving the engine's truncation note at the tail. */
@@ -312,6 +358,8 @@ function statusText(m: Model, first: number, last: number): string {
   if (m.rows.length === 0) parts.push('0 rows');
   else parts.push(`${first}-${last}/${m.rows.length} rows`);
   parts.push(m.isRepo ? `base ${m.baseline}` : 'no git repo');
+  // herdr tree bottom border: the current branch (omitted when detached/no repo).
+  if (m.branch !== undefined && m.branch !== '') parts.push(m.branch);
   if (m.changedOnly) parts.push('changed only');
   if (m.status !== '') parts.push(m.status);
   return parts.join(' · ');
@@ -319,7 +367,10 @@ function statusText(m: Model, first: number, last: number): string {
 
 function contentBody(ui: PaneElements, m: Model, from: number, to: number): RenderElement {
   if (m.contentKind === 'none') {
-    return ui.Text({ children: [m.notice ?? ''], dimColor: true, wrap: 'truncate-end' });
+    const props: Record<string, unknown> = { children: [m.notice ?? ''], wrap: 'truncate-end' };
+    if (m.notice !== undefined) props.color = 'warning'; // herdr notices strip
+    else props.dimColor = true;
+    return ui.Text(props);
   }
   const visible = m.contentLines.slice(from, to);
   if (m.contentKind === 'diff') {
@@ -375,19 +426,28 @@ export function renderPane(
   const start = clamp(m.treeStart, 0, Math.max(0, m.rows.length - layout.treeWindowRows));
   const windowRows = m.rows.slice(start, start + layout.treeWindowRows);
 
+  // Rows split into a coloured marker cell (herdr row_color) + a pressable
+  // name Button — Button is a leaf and cannot carry colour, so the marker
+  // (selection slot + M/A/D/?/●) lives in an adjacent Text.
   const treeChildren: RenderElement[] = windowRows.map((row) => {
     const isSelected = row.path === m.selectedPath;
-    const props: Record<string, unknown> = {
+    const markerProps: Record<string, unknown> = { children: [markerCell(row, isSelected)] };
+    const color = markerColor(row);
+    if (color !== undefined) markerProps.color = color;
+    const nameProps: Record<string, unknown> = {
       key: 'row:' + row.path,
-      label: rowLabel(row, isSelected),
+      label: rowName(row),
       plain: true,
       dimColor: row.kind === 'dir',
       onPress: () => actions.onRowPress(row.path, row.kind),
     };
-    if (isSelected) props.autoFocus = true;
-    return ui.Button(props);
+    if (isSelected) nameProps.autoFocus = true;
+    return ui.Box({
+      flexDirection: 'row',
+      children: [ui.Text(markerProps), ui.Button(nameProps)],
+    });
   });
-  if (treeChildren.length === 0) {
+  if (windowRows.length === 0) {
     treeChildren.push(ui.Text({ children: ['(empty)'], dimColor: true }));
   }
 
@@ -395,6 +455,8 @@ export function renderPane(
   const to = clamp(from + layout.contentRows, from, m.contentLines.length);
   const first = m.rows.length === 0 ? 0 : start + 1;
   const last = m.rows.length === 0 ? 0 : start + windowRows.length;
+  const treeFocus = m.focusSide === 'tree';
+  const contentFocus = m.focusSide === 'content';
 
   return ui.Box({
     flexDirection: 'column',
@@ -408,12 +470,19 @@ export function renderPane(
             width: layout.treeColumns,
             height: layout.treeRows,
             borderStyle: 'single',
+            borderColor: treeFocus ? FOCUS_BORDER : IDLE_BORDER,
             flexDirection: 'column',
-            children: treeChildren,
+            children: [
+              // herdr tree border title: the root directory's basename.
+              ui.Text({ children: [m.rootName === '' ? 'Files' : m.rootName], dimColor: true, wrap: 'truncate-end' }),
+              ...treeChildren,
+            ],
           }),
           ui.Box({
             flexDirection: 'column',
             flexGrow: 1,
+            borderStyle: 'single',
+            borderColor: contentFocus ? FOCUS_BORDER : IDLE_BORDER,
             children: [
               ui.Text({ children: [headerText(m, from, to)], dimColor: true, wrap: 'truncate-end' }),
               contentBody(ui, m, from, to),
@@ -421,7 +490,8 @@ export function renderPane(
           }),
         ],
       }),
-      ui.Text({ children: [statusText(m, first, last)], dimColor: true, wrap: 'truncate-end' }),
+      // herdr's reversed status bar: branch · baseline · filter · notice.
+      ui.Text({ children: [statusText(m, first, last)], inverse: true, wrap: 'truncate-end' }),
     ],
   });
 }

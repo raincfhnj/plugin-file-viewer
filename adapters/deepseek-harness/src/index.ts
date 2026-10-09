@@ -12,8 +12,12 @@
  * inserts the `dsh-file-viewer` package by name.
  *
  * Injected seams: `tools` (model tools) and `commands` (`/files`).
- * `sidebarRight` is deliberately NOT injected — it is a browser-plane service
- * (see src/files-command.ts and README.md).
+ * `sidebarRight` is deliberately NOT injected here — it is a browser-plane
+ * service (see src/files-command.ts and README.md). The right-sidebar pane
+ * opens through this package's browser half: `src/client.ts`, mounted from the
+ * same loader entry via the `dsh.client` manifest in package.json, watches the
+ * `tool/*` and `command/*` session events and calls `sidebarRight.openResource`
+ * (chain documented in README.md § 自动开 pane 的链路).
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-commands';
@@ -33,7 +37,9 @@ export const name = 'file-viewer';
  * makes the entry `pending (waiting for service: sidebarRight)` and the plugin
  * never activates (the service is provided by the browser client plane only).
  * `/files` resolves it optionally via `ctx.get('sidebarRight', false)` and
- * degrades to file info + the `dsh-resource://` address when absent.
+ * degrades to file info + the `dsh-resource://` address when absent; the
+ * browser half (src/client.ts) performs the actual auto-open from session
+ * events on the client plane.
  */
 export const inject = ['tools', 'commands'];
 

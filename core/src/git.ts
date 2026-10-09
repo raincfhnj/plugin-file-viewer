@@ -200,6 +200,110 @@ export async function defaultBaseBranch(host: Host, repoRootPath: string): Promi
   return undefined;
 }
 
+/** The current branch, or undefined outside a repo / on a detached HEAD (git.rs current_branch). */
+export async function currentBranch(host: Host, repoRootPath: string): Promise<string | undefined> {
+  const r = await host.runGit(repoRootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (r.exitCode !== 0) return undefined;
+  const out = r.stdout.trim();
+  return out !== '' && out !== 'HEAD' ? out : undefined;
+}
+
+/**
+ * Map one `git diff --name-status` code to a tree status (git.rs
+ * classify_name_status): first letter wins — A → Added, D → Deleted,
+ * M/T/R/C → Modified; anything else (unmerged `U`, blank) → undefined.
+ */
+export function classifyNameStatus(code: string): GitStatus | undefined {
+  switch (code.charAt(0)) {
+    case 'A':
+      return 'Added';
+    case 'D':
+      return 'Deleted';
+    case 'M':
+    case 'T':
+    case 'R':
+    case 'C':
+      return 'Modified';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Parse `git diff --name-status -z` output into a per-path status map.
+ * Fields alternate `code, path`; a rename/copy is the triple `code, old, new`
+ * and keys the NEW path (verified against git on this machine). Pure.
+ */
+export function parseNameStatus(out: string): Map<string, GitStatus> {
+  const map = new Map<string, GitStatus>();
+  const fields = out.split(NUL).filter((f) => f.length > 0);
+  for (let i = 0; i < fields.length; i++) {
+    const code = fields[i] as string;
+    const isRename = code.charAt(0) === 'R' || code.charAt(0) === 'C';
+    // Rename/copy: skip `old`, key `new`; otherwise the next field is the path.
+    const path = isRename ? fields[i + 2] : fields[i + 1];
+    i += isRename ? 2 : 1;
+    if (path === undefined) break;
+    const status = classifyNameStatus(code);
+    if (!status) continue;
+    const key = path.replace(/\\/g, '/');
+    if (!map.has(key)) map.set(key, status);
+  }
+  return map;
+}
+
+/**
+ * The baseline-aware changed-set driving herdr's tree markers and the `c`
+ * filter (git.rs changed_set): `HEAD` is exactly the working-tree status;
+ * `Base` is `git diff --name-status <fork-point>` (committed-on-branch AND
+ * uncommitted tracked changes vs the merge-base) merged with Untracked files.
+ * No resolvable base branch degrades to `HEAD` — same as fileDiff's Base path.
+ */
+export async function changedSet(
+  host: Host,
+  repoRootPath: string,
+  baseline: Baseline,
+  opts: { baseBranch?: string } = {},
+): Promise<Map<string, GitStatus>> {
+  if (baseline === 'HEAD') return status(host, repoRootPath);
+  const base = opts.baseBranch ?? (await defaultBaseBranch(host, repoRootPath));
+  if (!base) return status(host, repoRootPath);
+  const mb = await host.runGit(repoRootPath, ['merge-base', 'HEAD', base]);
+  const fork = mb.exitCode === 0 && mb.stdout.trim() !== '' ? mb.stdout.trim() : base;
+  const map = new Map<string, GitStatus>();
+  const r = await host.runGit(repoRootPath, [
+    'diff',
+    ...SAFE_DIFF_FLAGS,
+    '--name-status',
+    '-z',
+    fork,
+  ]);
+  if (r.exitCode === 0) {
+    for (const [k, v] of parseNameStatus(r.stdout)) map.set(k, v);
+  }
+  // Untracked files are not in `git diff` but belong to the body of work.
+  for (const [k, v] of await status(host, repoRootPath)) {
+    if (v === 'Untracked' && !map.has(k)) map.set(k, v);
+  }
+  return map;
+}
+
+/**
+ * Context-smart default baseline (git.rs default_baseline, AC-14/15): Base on
+ * a branch other than the base branch, else HEAD. `origin/x` and `x` compare
+ * equal (the base candidates favour remote-tracking refs while HEAD is local).
+ * Detached-HEAD worktree detection is not ported: core Host has no worktree
+ * notion, so detached → HEAD here.
+ */
+export async function defaultBaseline(host: Host, repoRootPath: string): Promise<Baseline> {
+  const base = await defaultBaseBranch(host, repoRootPath);
+  if (!base) return 'HEAD';
+  const cur = await currentBranch(host, repoRootPath);
+  if (cur === undefined) return 'HEAD';
+  const norm = (b: string): string => b.replace(/^origin\//, '');
+  return norm(base) === norm(cur) ? 'HEAD' : 'Base';
+}
+
 /** Apply SAFE flags/env around a raw runner — exported so adapters share one path. */
 export async function safeRun(
   raw: (args: string[], env: Record<string, string>) => Promise<RunResult>,

@@ -7,11 +7,16 @@ import {
   SAFE_DIFF_FLAGS,
   SAFE_GIT_ENV,
   SAFE_GIT_FLAGS,
+  changedSet,
   classify,
+  classifyNameStatus,
+  currentBranch,
   defaultBaseBranch,
+  defaultBaseline,
   fileDiff,
   isRepo,
   normalizeNoIndex,
+  parseNameStatus,
   parsePorcelainStatus,
   repoRoot,
   safeRun,
@@ -375,4 +380,170 @@ test('safeRun: prepends the safe flags and env around the raw runner', async () 
   assert.equal(r.stdout, 'ok');
   assert.deepEqual(seen!.args, [...SAFE_GIT_FLAGS(true), 'status']);
   assert.deepEqual(seen!.env, SAFE_GIT_ENV);
+});
+
+// ---- classifyNameStatus / parseNameStatus -------------------------------
+
+test('classifyNameStatus: name-status letter mapping (git.rs parity)', () => {
+  const cases: Array<[string, string | undefined]> = [
+    ['A', 'Added'],
+    ['D', 'Deleted'],
+    ['M', 'Modified'],
+    ['T', 'Modified'],
+    ['R100', 'Modified'],
+    ['C750', 'Modified'],
+    ['U', undefined],
+    ['', undefined],
+  ];
+  for (const [code, want] of cases) {
+    assert.equal(classifyNameStatus(code), want, `classifyNameStatus(${JSON.stringify(code)})`);
+  }
+});
+
+test('parseNameStatus: alternating code/path fields', () => {
+  const map = parseNameStatus(z('M', 'src/a.ts', 'A', 'docs/new.md', 'D', 'old.md'));
+  assert.equal(map.get('src/a.ts'), 'Modified');
+  assert.equal(map.get('docs/new.md'), 'Added');
+  assert.equal(map.get('old.md'), 'Deleted');
+  assert.equal(map.size, 3);
+});
+
+test('parseNameStatus: rename is the code/old/new triple, keys the NEW path', () => {
+  // Verified against `git diff --name-status -z --cached` on this machine:
+  // R100<NUL>old<NUL>new<NUL>
+  const map = parseNameStatus(z('R100', 'a.txt', 'b.txt', 'M', 'after.ts'));
+  assert.equal(map.get('b.txt'), 'Modified', "rename's NEW path is keyed");
+  assert.equal(map.has('a.txt'), false, "rename's old path is skipped");
+  assert.equal(map.get('after.ts'), 'Modified', 'the record after the rename parses (no desync)');
+  assert.equal(map.size, 2);
+});
+
+test('parseNameStatus: copy triple consumes old+new; trailing truncated field breaks', () => {
+  assert.equal(parseNameStatus(z('C750', 'orig.txt', 'copy.txt')).get('copy.txt'), 'Modified');
+  assert.equal(parseNameStatus(z('R100', 'old.txt')).size, 0, 'triple with missing new → stop');
+});
+
+test('parseNameStatus: unknown code letters are skipped; backslashes normalize', () => {
+  const map = parseNameStatus(z('U', 'conflict.txt', 'M', 'src\\win.ts'));
+  assert.equal(map.size, 1);
+  assert.equal(map.get('src/win.ts'), 'Modified');
+});
+
+// ---- changedSet ----------------------------------------------------------
+
+test('changedSet HEAD: exactly the working-tree status', async () => {
+  const h = fakeHost((args) => (args[0] === 'status' ? OK(z(' M a.ts', '?? u.txt')) : FAIL()));
+  const map = await changedSet(h.host, '/repo', 'HEAD');
+  assert.equal(map.get('a.ts'), 'Modified');
+  assert.equal(map.get('u.txt'), 'Untracked');
+  assert.ok(h.calls.every((c) => c[0] === 'status'), 'HEAD path issues no diff');
+});
+
+test('changedSet Base: name-status vs fork-point, untracked merged in', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'symbolic-ref') return FAIL(1);
+    if (args[0] === 'rev-parse') return args[2] === 'main' ? OK('main\n') : FAIL(1);
+    if (args[0] === 'merge-base') return OK('FORK\n');
+    if (args[0] === 'diff') return OK(z('M', 'committed.ts', 'A', 'branch-new.md'));
+    if (args[0] === 'status') return OK(z('?? untracked.txt'));
+    return FAIL();
+  });
+  const map = await changedSet(h.host, '/repo', 'Base');
+  assert.equal(map.get('committed.ts'), 'Modified', 'committed-on-branch file carries a marker');
+  assert.equal(map.get('branch-new.md'), 'Added');
+  assert.equal(map.get('untracked.txt'), 'Untracked', 'untracked merged from status');
+  assert.deepEqual(
+    h.calls.find((c) => c[0] === 'diff'),
+    ['diff', ...SAFE_DIFF_FLAGS, '--name-status', '-z', 'FORK'],
+    'diff hardening flags present, fork-point as the revision',
+  );
+});
+
+test('changedSet Base: merge-base failure diffs against the base branch itself', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'rev-parse') return args[2] === 'main' ? OK('main\n') : FAIL(1);
+    if (args[0] === 'symbolic-ref') return FAIL(1);
+    if (args[0] === 'merge-base') return FAIL(1, 'no merge base');
+    if (args[0] === 'diff') return OK(z('M', 'x.ts'));
+    if (args[0] === 'status') return OK('');
+    return FAIL();
+  });
+  const map = await changedSet(h.host, '/repo', 'Base');
+  assert.equal(map.get('x.ts'), 'Modified');
+  assert.deepEqual(h.calls.find((c) => c[0] === 'diff'), [
+    'diff',
+    ...SAFE_DIFF_FLAGS,
+    '--name-status',
+    '-z',
+    'main',
+  ]);
+});
+
+test('changedSet Base: no base branch → degrades to HEAD status (fileDiff parity)', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'symbolic-ref' || args[0] === 'rev-parse') return FAIL(1);
+    if (args[0] === 'status') return OK(z(' M a.ts'));
+    return FAIL();
+  });
+  const map = await changedSet(h.host, '/repo', 'Base');
+  assert.equal(map.get('a.ts'), 'Modified');
+  assert.ok(!h.calls.some((c) => c[0] === 'diff'), 'no diff issued without a base');
+});
+
+test('changedSet: not a repo → empty map', async () => {
+  const h = fakeHost(() => FAIL(-1, 'not a git repository'));
+  assert.equal((await changedSet(h.host, '/repo', 'HEAD')).size, 0);
+  assert.equal((await changedSet(h.host, '/repo', 'Base')).size, 0);
+});
+
+test('changedSet Base: an untracked path already in the diff is not overwritten', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'rev-parse') return args[2] === 'main' ? OK('main\n') : FAIL(1);
+    if (args[0] === 'symbolic-ref') return FAIL(1);
+    if (args[0] === 'merge-base') return OK('FORK\n');
+    if (args[0] === 'diff') return OK(z('A', 'both.txt'));
+    if (args[0] === 'status') return OK(z('?? both.txt'));
+    return FAIL();
+  });
+  const map = await changedSet(h.host, '/repo', 'Base');
+  assert.equal(map.get('both.txt'), 'Added', 'diff (committed) status wins over Untracked merge');
+});
+
+// ---- currentBranch / defaultBaseline -------------------------------------
+
+test('currentBranch: branch name, undefined on detached HEAD / failure', async () => {
+  assert.equal(await currentBranch(fakeHost(() => OK('feature/x\n')).host, '/repo'), 'feature/x');
+  assert.equal(await currentBranch(fakeHost(() => OK('HEAD\n')).host, '/repo'), undefined);
+  assert.equal(await currentBranch(fakeHost(() => FAIL(-1)).host, '/repo'), undefined);
+});
+
+test('defaultBaseline: Base on a branch other than the base branch (AC-14)', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'symbolic-ref') return OK('refs/remotes/origin/main\n');
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return OK('feature/x\n');
+    return FAIL(1);
+  });
+  assert.equal(await defaultBaseline(h.host, '/repo'), 'Base');
+});
+
+test('defaultBaseline: HEAD on the base branch — origin/main ≡ main (AC-15)', async () => {
+  const h = fakeHost((args) => {
+    if (args[0] === 'symbolic-ref') return OK('refs/remotes/origin/main\n');
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return OK('main\n');
+    return FAIL(1);
+  });
+  assert.equal(await defaultBaseline(h.host, '/repo'), 'HEAD');
+});
+
+test('defaultBaseline: no base branch or detached HEAD → HEAD', async () => {
+  const noBase = fakeHost((args) =>
+    args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? OK('main\n') : FAIL(1),
+  );
+  assert.equal(await defaultBaseline(noBase.host, '/repo'), 'HEAD');
+  const detached = fakeHost((args) => {
+    if (args[0] === 'symbolic-ref') return OK('refs/remotes/origin/main\n');
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return OK('HEAD\n');
+    return FAIL(1);
+  });
+  assert.equal(await defaultBaseline(detached.host, '/repo'), 'HEAD');
 });

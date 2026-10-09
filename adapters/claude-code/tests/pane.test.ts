@@ -1,5 +1,15 @@
 import { expect, test } from 'claude-code/testing';
-import { fitText, renderPane, rowLabel, TEXT_LIMIT, type Model, type PaneElements } from '../hooks/pane.ts';
+import {
+  fitText,
+  markerCell,
+  markerColor,
+  renderPane,
+  rowLabel,
+  statusMark,
+  TEXT_LIMIT,
+  type Model,
+  type PaneElements,
+} from '../hooks/pane.ts';
 import type { TreeNode } from '../hooks/core/types.ts';
 
 function file(path: string, depth = 0, status?: TreeNode['status']): TreeNode {
@@ -34,6 +44,8 @@ function modelWith(overrides: Partial<Model>): Model {
     isFindOpen: false,
     findQuery: '',
     status: '',
+    rootName: '',
+    focusSide: 'toolbar',
     ...overrides,
   };
 }
@@ -53,19 +65,37 @@ const noopActions = {
 };
 
 test('a tree row label carries selection, git mark, indent and name', () => {
-  expect(rowLabel(file('src/a.ts', 1, 'Modified'), false)).toBe('  M   a.ts');
-  expect(rowLabel(file('src/a.ts', 1, 'Modified'), true)).toBe('❯ M   a.ts');
-  expect(rowLabel(file('README.md', 0), false)).toBe('    README.md');
-  expect(rowLabel(file('new.ts', 0, 'Untracked'), false)).toBe('  ? new.ts');
-  expect(rowLabel(file('gone.ts', 0, 'Deleted'), false)).toBe('  D gone.ts');
-  expect(rowLabel(file('added.ts', 0, 'Added'), false)).toBe('  A added.ts');
+  // Files reserve the caret's 2 columns (herdr #130) so siblings line up.
+  expect(rowLabel(file('src/a.ts', 1, 'Modified'), false)).toBe('  M     a.ts');
+  expect(rowLabel(file('src/a.ts', 1, 'Modified'), true)).toBe('❯ M     a.ts');
+  expect(rowLabel(file('README.md', 0), false)).toBe('      README.md');
+  expect(rowLabel(file('new.ts', 0, 'Untracked'), false)).toBe('  ?   new.ts');
+  expect(rowLabel(file('gone.ts', 0, 'Deleted'), false)).toBe('  D   gone.ts');
+  expect(rowLabel(file('added.ts', 0, 'Added'), false)).toBe('  A   added.ts');
 });
 
-test('directory rows show their expansion caret and a dirty mark', () => {
+test('directory rows show their expansion caret; a dirty directory carries ●', () => {
   expect(rowLabel(dir('src', 0, false), false)).toBe('    ▸ src');
   expect(rowLabel(dir('src', 0, true), false)).toBe('    ▾ src');
-  expect(rowLabel(dir('assets', 0, true, true), false)).toBe('    ▾ assets~');
+  expect(rowLabel(dir('assets', 0, true, true), false)).toBe('  ● ▾ assets');
   expect(rowLabel(dir('deep', 1, false), false)).toBe('      ▸ deep');
+});
+
+test('statusMark and markerColor follow herdr presenter glyphs and colours', () => {
+  expect(statusMark(file('a', 0, 'Modified'))).toBe('M');
+  expect(statusMark(file('a', 0, 'Deleted'))).toBe('D');
+  expect(statusMark(file('a', 0, 'Untracked'))).toBe('?');
+  expect(statusMark(file('a', 0))).toBe(' ');
+  expect(statusMark(dir('d', 0, false))).toBe(' ');
+  expect(statusMark(dir('d', 0, false, true))).toBe('●');
+  expect(markerColor(file('a', 0, 'Modified'))).toBe('error');
+  expect(markerColor(file('a', 0, 'Deleted'))).toBe('error');
+  expect(markerColor(file('a', 0, 'Added'))).toBe('success');
+  expect(markerColor(file('a', 0, 'Untracked'))).toBe('success');
+  expect(markerColor(file('a', 0))).toBe(undefined);
+  expect(markerColor(dir('d', 0, false, true))).toBe('error');
+  expect(markerColor(dir('d', 0, false))).toBe(undefined);
+  expect(markerCell(dir('d', 0, false, true), true)).toBe('❯ ● ');
 });
 
 test('truncated text ends with the engine note and fits the element cap', () => {

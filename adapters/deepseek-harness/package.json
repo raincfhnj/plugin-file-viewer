@@ -4,8 +4,14 @@
   "description": "Git-aware read-only file viewer for DeepSeek Harness (dsh): file_tree / file_diff / content_search model tools plus the /files command.",
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
+    "client.js",
     "src",
     "cordis.patch.yml",
     "skills"
@@ -13,10 +19,18 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   },
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=index.js --external:@deepseek-ai/*",
+    "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test tests/"
   },

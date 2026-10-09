@@ -260,6 +260,83 @@ test('listRows: dirDirty matches whole path components only', async () => {
   assert.equal(rows.find((r) => r.path === 'src2')!.dirDirty, true);
 });
 
+// ---- baseline changed-set fallback markers (git_tree_markers.rs) ---------
+
+test('changedSet fallback: clean working tree still shows committed markers and dir dots', () => {
+  // herdr test: full tree first frame shows committed file and directory markers
+  // without pressing `c` — the baseline set fills in where status is empty.
+  return listRows(
+    fakeHost(baseFs()),
+    toggle(createTreeState(), 'src'),
+    sm(), // clean working tree
+    { ...SHOW, changedSet: sm(['alpha.txt', 'Modified'], ['src/main.rs', 'Modified']) },
+  ).then((rows) => {
+    assert.equal(rows.find((r) => r.path === 'alpha.txt')!.status, 'Modified');
+    assert.equal(rows.find((r) => r.path === 'src/main.rs')!.status, 'Modified');
+    assert.equal(rows.find((r) => r.path === 'src')!.dirDirty, true, 'dirty dot from the fallback');
+    assert.equal(rows.find((r) => r.path === 'README.md')!.status, undefined);
+    assert.equal(rows.find((r) => r.path === 'docs')!.dirDirty, false);
+  });
+});
+
+test('changedSet fallback: working-tree status wins over the baseline set', () => {
+  // herdr test: working_tree_status_keeps_precedence_over_baseline_fallback —
+  // a branch-added file subsequently edited is working-tree modified.
+  return listRows(
+    fakeHost(baseFs()),
+    createTreeState(),
+    sm(['alpha.txt', 'Modified']),
+    { ...SHOW, changedSet: sm(['alpha.txt', 'Added'], ['README.md', 'Added']) },
+  ).then((rows) => {
+    assert.equal(rows.find((r) => r.path === 'alpha.txt')!.status, 'Modified', 'status wins');
+    assert.equal(rows.find((r) => r.path === 'README.md')!.status, 'Added', 'fallback fills gaps');
+  });
+});
+
+test('changedSet fallback: dirDirty scans the union of both maps', () => {
+  const fs: Record<string, DirEntry[]> = {
+    '': [d('src'), d('clean'), d('docs')],
+    src: [] as DirEntry[],
+    clean: [] as DirEntry[],
+    docs: [] as DirEntry[],
+  };
+  return listRows(
+    fakeHost(fs),
+    createTreeState(),
+    sm(['docs/guide.md', 'Modified']), // working-tree dirties docs
+    { ...SHOW, changedSet: sm(['src/lib/util.rs', 'Modified']) }, // baseline dirties src
+  ).then((rows) => {
+    assert.equal(rows.find((r) => r.path === 'docs')!.dirDirty, true);
+    assert.equal(rows.find((r) => r.path === 'src')!.dirDirty, true, 'union: src from changedSet');
+    assert.equal(rows.find((r) => r.path === 'clean')!.dirDirty, false);
+  });
+});
+
+test('changedSet: changed-only filters on the baseline set when given (herdr `c`)', () => {
+  // The filter source is changedSet, not the working-tree status: committed
+  // branch changes appear under `c` even though status is empty for them.
+  return listRows(
+    blindHost, // synthesized rows never touch the fs
+    createTreeState(),
+    sm(['stale.txt', 'Modified']), // working-tree-only entry NOT in the baseline set
+    { ...CHANGED_ONLY, changedSet: sm(['alpha.txt', 'Modified'], ['docs/guide.md', 'Added']) },
+  ).then((rows) => {
+    assert.deepEqual(paths(rows), ['docs', 'docs/guide.md', 'alpha.txt']);
+    assert.ok(!paths(rows).includes('stale.txt'), 'the filter reads changedSet, not status');
+  });
+});
+
+test('changedSet: absent → previous behaviour (status is the filter and markers)', () => {
+  return listRows(
+    blindHost,
+    createTreeState(),
+    sm(['alpha.txt', 'Modified']),
+    CHANGED_ONLY,
+  ).then((rows) => {
+    assert.deepEqual(paths(rows), ['alpha.txt']);
+  });
+});
+
 // ---- changed-only --------------------------------------------------------
 
 test('changedOnly: synthesizes changed files + ancestors without touching the fs', async () => {

@@ -28,9 +28,19 @@ function repoRelative(path: unknown): string {
 
 function gitAnswer(e: { argv: unknown }): { value: { exitCode: number; stdout: string; stderr: string } } {
   const argv = e.argv as string[];
-  if (argv.includes('rev-parse')) return { value: { exitCode: 0, stdout: `${ROOT}\n`, stderr: '' } };
+  // Realistic ordering: toplevel → abbrev-ref → symbolic-ref → verify → merge-base.
+  if (argv.includes('--show-toplevel')) return { value: { exitCode: 0, stdout: `${ROOT}\n`, stderr: '' } };
+  if (argv.includes('--abbrev-ref')) return { value: { exitCode: 0, stdout: 'main\n', stderr: '' } };
+  if (argv.includes('symbolic-ref')) return { value: { exitCode: 1, stdout: '', stderr: 'mock' } };
+  if (argv.includes('--verify')) return { value: { exitCode: 0, stdout: 'main\n', stderr: '' } };
+  if (argv.includes('merge-base')) return { value: { exitCode: 0, stdout: 'fork\n', stderr: '' } };
   if (argv.includes('status')) return { value: { exitCode: 0, stdout: ` M README.md${NUL}`, stderr: '' } };
-  return { value: { exitCode: 0, stdout: '', stderr: '' } };
+  // `diff --name-status` (changedSet) marks README.md against the fork point.
+  if (argv.includes('--name-status')) {
+    return { value: { exitCode: 0, stdout: `M${NUL}README.md${NUL}`, stderr: '' } };
+  }
+  if (argv.includes('diff')) return { value: { exitCode: 0, stdout: '', stderr: '' } };
+  return { value: { exitCode: 1, stdout: '', stderr: 'mock: unhandled git' } };
 }
 
 test('/files src/x.ts:42 selects the file and positions the content window', async ($, on) => {
